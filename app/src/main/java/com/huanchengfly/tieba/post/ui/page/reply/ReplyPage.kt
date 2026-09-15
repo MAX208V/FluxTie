@@ -75,8 +75,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -103,7 +101,6 @@ import com.huanchengfly.tieba.post.ui.page.reply.ReplyPanelType.IMAGE
 import com.huanchengfly.tieba.post.ui.page.reply.ReplyPanelType.NONE
 import com.huanchengfly.tieba.post.ui.utils.imeNestedScroll
 import com.huanchengfly.tieba.post.ui.widgets.compose.BaseDialog
-import com.huanchengfly.tieba.post.ui.widgets.compose.BaseTextField
 import com.huanchengfly.tieba.post.ui.widgets.compose.Dialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogNegativeButton
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogPositiveButton
@@ -242,11 +239,33 @@ internal fun ReplyPageContent(
     if (forumId != 0L && threadId == 0L) viewModel.send(ReplyUiIntent.SwitchReplyType(ReplyType.TOPIC_THREAD))
     val keyboardController = LocalSoftwareKeyboardController.current
     var initialText by remember { mutableStateOf("") }
-    var threadTitle by remember { mutableStateOf("") }
     var waitEditTextToSet by remember { mutableStateOf(false) }
     var editTextView by remember { mutableStateOf<UndoableEditText?>(null) }
     fun getText(): String {
         return editTextView?.text?.toString().orEmpty()
+    }
+
+    fun parseTitleAndContent(raw: String): Pair<String, String> {
+        if (!isTopicThread) return "" to raw
+        val normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+        val idx = normalized.indexOf('\n')
+        return if (idx == -1) {
+            normalized.take(31) to ""
+        } else {
+            normalized.substring(0, idx).take(31) to normalized.substring(idx + 1)
+        }
+    }
+
+    fun getTitleForSend(raw: String): String? {
+        if (!isTopicThread) return null
+        val (t, _) = parseTitleAndContent(raw)
+        return t
+    }
+
+    fun getContentForSend(raw: String): String {
+        if (!isTopicThread) return raw
+        val (_, c) = parseTitleAndContent(raw)
+        return c
     }
 
     fun setText(text: String) {
@@ -325,14 +344,19 @@ internal fun ReplyPageContent(
                 .joinToString("\n") { image ->
                     "#(pic,${image.picId ?: 0},${image.picInfo?.originPic?.width ?: 0},${image.picInfo?.originPic?.height ?: 0})"
                 }
+            val rawForImage = getText()
+            val (parsedTitleImg, parsedContentImg) = parseTitleAndContent(rawForImage)
+            val contentWithImage = if (parsedContentImg.isEmpty()) imageContent else "$parsedContentImg\n$imageContent"
+            val finalContentImg = if (isTopicThread) contentWithImage else "${rawForImage}\n$imageContent"
+            val finalTitleImg = if (isTopicThread) parsedTitleImg else null
             viewModel.send(
                 ReplyUiIntent.Send(
-                    "${getText()}\n$imageContent",
+                    finalContentImg,
                     forumId,
                     forumName,
                     threadId,
                     curTbs,
-                    title = threadTitle.takeIf { isTopicThread },
+                    title = finalTitleImg,
                     postId,
                     subPostId,
                     replyUserId,
@@ -442,7 +466,16 @@ internal fun ReplyPageContent(
         }
     }
 
-    val canSend by remember { derivedStateOf { !isTextEmpty || selectedImageList.isNotEmpty() } }
+    val canSend by remember {
+        derivedStateOf {
+            if (isTopicThread) {
+                val firstLine = curText.replace("\r\n", "\n").replace("\r", "\n").substringBefore("\n")
+                firstLine.isNotBlank()
+            } else {
+                !isTextEmpty || selectedImageList.isNotEmpty()
+            }
+        }
+    }
 
     val textFieldScrollState = rememberScrollState()
 
@@ -494,31 +527,6 @@ internal fun ReplyPageContent(
             )
         }
         VerticalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-        if (isTopicThread) {
-            BaseTextField(
-                value = threadTitle,
-                onValueChange = { if (it.length <= 31) threadTitle = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                singleLine = true,
-                textStyle = MaterialTheme.typography.subtitle1.copy(
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                ),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                ),
-                placeholder = {
-                    Text(
-                        text = stringResource(id = R.string.hint_thread_title),
-                        style = MaterialTheme.typography.subtitle1.copy(fontSize = 15.sp),
-                        color = ExtendedTheme.colors.textSecondary,
-                    )
-                },
-            )
-            VerticalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-        }
         Box(
             modifier = Modifier
                 .wrapContentHeight()
@@ -650,11 +658,23 @@ internal fun ReplyPageContent(
             } else {
                 IconButton(
                     onClick = {
-                        val replyContent = if (subPostId == null || subPostId == 0L) {
-                            getText()
-                        } else {
-                            "回复 #(reply, ${replyUserPortrait}, ${replyUserName}) :${getText()}"
+                        if (isTopicThread) {
+                            val raw = getText()
+                            val (parsedTitle, parsedContent) = parseTitleAndContent(raw)
+                            if (parsedTitle.isBlank()) {
+                                context.toastShort("标题不能为空，第一行请输入标题")
+                                return@IconButton
+                            }
                         }
+                        val rawText = getText()
+                        val replyContent = if (isTopicThread) {
+                            getContentForSend(rawText)
+                        } else if (subPostId == null || subPostId == 0L) {
+                            rawText
+                        } else {
+                            "回复 #(reply, ${replyUserPortrait}, ${replyUserName}) :${rawText}"
+                        }
+                        val titleForSend = getTitleForSend(rawText)
                         if (selectedImageList.isEmpty()) {
                             viewModel.send(
                                 ReplyUiIntent.Send(
@@ -663,7 +683,7 @@ internal fun ReplyPageContent(
                                     forumName = forumName,
                                     threadId = threadId,
                                     tbs = curTbs,
-                                    title = threadTitle.takeIf { isTopicThread },
+                                    title = titleForSend,
                                     postId = postId,
                                     subPostId = subPostId,
                                     replyUserId = replyUserId
